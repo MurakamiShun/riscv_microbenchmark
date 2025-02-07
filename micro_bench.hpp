@@ -2,6 +2,11 @@
 #include <cstdint>
 #include <array>
 #include <random>
+#include <atomic>
+#include <thread>
+#include <sched.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 #define op2_latency_asm_impl16(reg, op) #op " " #reg "16, " #reg "31, " #reg "31;" \
 #op " " #reg "17, " #reg "16, " #reg "16;" \
@@ -877,7 +882,7 @@ double memory_throughput(uint64_t size, uint64_t cycle_per_rdtime, uint64_t cpu_
     uint64_t* addr = (uint64_t*)std::aligned_alloc(2*1024*1024, size_align);
 
     double bytes_per_sec = 0;
-    for(int i = 0; i < 100; ++i){
+    for(int i = 0; i < 1000; ++i){
         uint64_t time;
         asm volatile(
             "mv     s1, %1;"
@@ -907,6 +912,50 @@ double memory_throughput(uint64_t size, uint64_t cycle_per_rdtime, uint64_t cpu_
         bytes_per_sec += ((double)size_align*cpu_Hz)/((double)time*cycle_per_rdtime);
     }
     std::free(addr);
-    return bytes_per_sec/100.0;
+    return bytes_per_sec/1000.0;
+}
+
+
+double core_latency(uint64_t core1, uint64_t core2, uint64_t cycle_per_rdtime){
+    volatile uint64_t* shared = (uint64_t*)std::aligned_alloc(4*1024, sizeof(uint64_t));
+    *shared = 3;
+    std::atomic<double> times[2];
+
+    const auto pingpong = [](uint64_t cycle_per_rdtime, volatile uint64_t* shared, uint64_t id, bool odd, std::atomic<double>* time_ref){
+        cpu_set_t cpu_set;
+        CPU_ZERO(&cpu_set);
+        CPU_SET(id, &cpu_set);
+        sched_setaffinity(syscall(SYS_gettid), sizeof(cpu_set), &cpu_set);
+
+        while(*shared == 3);
+        uint64_t time;
+        asm volatile(
+            "mv     s1, %1;"
+            "rdtime s0;"
+            "loop%=:"
+                "addi   s1, s1, -1;"
+                "busy_loop%=:"
+                    "ld  t0, (%2);"
+                    "beq t0, %3, busy_loop%=;"
+                "sd %3, (%2);"
+            "bne    s1, zero, loop%=;"
+            "rdtime s1;"
+            "sub    %0, s1, s0;"
+            : "=r"(time)
+            : "r"(cycle_per_rdtime*100), "r"(shared), "r"((uint64_t)odd)
+            : "memory",
+            "s0","s1","t0"
+        );
+        *time_ref = time / 100.0;
+    };
+
+    std::thread th0(pingpong, cycle_per_rdtime, shared, core1, 0, &times[0]);
+    std::thread th1(pingpong, cycle_per_rdtime, shared, core2, 1, &times[1]);
+    *shared = 0;
+    th0.join();
+    th1.join();
+
+    std::free((void*)shared);
+    return std::min(times[0], times[1])/ 2.0;
 }
 

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <thread>
 #include <iomanip>
+#include <fstream>
 
 #include "micro_bench.hpp"
 
@@ -127,10 +128,23 @@ double get_cycle_per_rdtime(uint64_t cpu_Hz){
     return cpu_Hz / (cycle_per_time/3.0 * 10.0);
 }
 
+uint64_t get_cpu_clock(){
+    std::ifstream ifs("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+    if(!ifs){
+        std::cout << "Can not get cpu frequency!!" << std::endl;
+        exit(1);
+    }
+    uint64_t cpu_freq;
+    ifs >> cpu_freq;
+    return cpu_freq;
+}
+
 int main(){
 
     op2_latency_asm(x, mul, 1000); /*warmup*/
-    constexpr uint64_t cpu_hz = 1'600'000'000;
+
+    const uint64_t cpu_hz = get_cpu_clock() * 1000;
+    std::cout << "CPU frequency : " << cpu_hz << " Hz" << std::endl;
     
     const double cycle_per_rdtime = get_cycle_per_rdtime(cpu_hz);
     std::cout << "cycle per RDTIME : " << cycle_per_rdtime << std::endl;
@@ -276,6 +290,25 @@ int main(){
     std::cout << "memory throughput" << std::endl;
     for(uint64_t size = 1024; size <= 64*1024*1024; size*=2){
         memory_throughput_microbench(size, cycle_per_rdtime, cpu_hz);
+    }
+
+    std::cout << "core-to-core latency" << std::endl;
+    const auto core_num = std::thread::hardware_concurrency();
+    std::cout << "    ";
+    for(int i = 0; i < core_num; ++i){
+        std::cout << std::setw(6) << i;
+    }
+    std::cout << std::endl;
+    for(int i = 0; i < core_num; ++i){
+        std::cout << std::setw(2) << i << " : ";
+        for(int j = 0; j < core_num; ++j){
+            if(i == j) {
+                std::cout << " ---  ";
+                continue;
+            }
+            std::cout << std::fixed << std::setprecision(1) << core_latency(i, j, cycle_per_rdtime) << " ";
+        }
+        std::cout << std::endl;
     }
 }
 
